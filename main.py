@@ -87,6 +87,8 @@ class DrinkRequest(BaseModel):
 
 # ---------- Response Models ----------
 
+# We keep this around in case we want richer internal models later,
+# but the JSON we send to the app will always use ingredients as [str].
 class DrinkIngredient(BaseModel):
     """Individual ingredient with measurement"""
     name: str
@@ -96,10 +98,11 @@ class DrinkIngredient(BaseModel):
 
 
 class Drink(BaseModel):
-    """A complete drink recipe"""
+    """A complete drink recipe as sent to the iOS app"""
     name: str
     description: str
-    ingredients: List[DrinkIngredient]
+    # IMPORTANT: ingredients are STRINGS in the JSON contract with the app
+    ingredients: List[str]
     steps: List[str] = Field(description="Step-by-step instructions")
     variations: List[str] = Field(default_factory=list)
     mood: Optional[str] = None
@@ -200,7 +203,6 @@ Do NOT include the word "json".
 Do NOT wrap the JSON in a code block.
 Do NOT add extra top-level fields.
 Return exactly one JSON object in this schema.
-}
 
 Rules:
 - All ingredients must be non-alcoholic
@@ -208,7 +210,8 @@ Rules:
 - Match the user's flavor preferences and mood
 - Respect all dietary restrictions strictly
 - Be creative but practical with common ingredients
-- Each drink should be unique and memorable"""
+- Each drink should be unique and memorable
+"""
 
 
 # ---------- Prompt Builder ----------
@@ -344,26 +347,32 @@ async def generate_drinks(
 
     # Validate and transform response
     try:
-        drinks = []
+        drinks: List[Drink] = []
+
         for drink_data in data.get("drinks", []):
-            # Handle both flat ingredient strings and structured ingredients
+            # Normalize ingredients to a list of strings for the iOS client
             raw_ingredients = drink_data.get("ingredients", [])
-            ingredients = []
+            ingredients: List[str] = []
 
             for ing in raw_ingredients:
                 if isinstance(ing, str):
-                    # Parse string like "2 oz orange juice"
-                    ingredients.append(DrinkIngredient(name=ing, amount="", unit=None, notes=None))
+                    # Already in the format the app expects
+                    ingredients.append(ing)
                 elif isinstance(ing, dict):
-                    # Defensive: ensure required fields exist
-                    ing_name = ing.get("name") or ing.get("ingredient") or "Unknown ingredient"
-                    ing_amount = ing.get("amount") or ing.get("quantity") or ""
-                    ingredients.append(DrinkIngredient(
-                        name=str(ing_name),
-                        amount=str(ing_amount),
-                        unit=ing.get("unit"),
-                        notes=ing.get("notes")
-                    ))
+                    # Build a single line like "2 oz fresh orange juice (freshly squeezed)"
+                    name = ing.get("name") or ing.get("ingredient") or ""
+                    amount = ing.get("amount") or ing.get("quantity") or ""
+                    unit = ing.get("unit") or ""
+                    notes = ing.get("notes") or ""
+
+                    parts = [p.strip() for p in [amount, unit, str(name)] if p and str(p).strip()]
+                    line = " ".join(parts) if parts else str(name).strip()
+
+                    if notes:
+                        line = f"{line} ({notes})"
+
+                    if line:
+                        ingredients.append(line)
 
             # Handle instructions as either string or list
             raw_instructions = drink_data.get("instructions") or drink_data.get("steps", [])
@@ -408,7 +417,7 @@ async def generate_drinks(
             logger.info(f"First drink keys: {list(first_drink.keys())}")
             logger.info(f"First drink ingredients count: {len(first_drink.get('ingredients', []))}")
             if first_drink.get('ingredients'):
-                logger.info(f"First ingredient keys: {list(first_drink['ingredients'][0].keys())}")
+                logger.info(f"First ingredient preview: {first_drink['ingredients'][0]}")
 
         return response
 
@@ -435,4 +444,3 @@ async def recommend_drinks(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-    
