@@ -101,19 +101,24 @@ class Drink(BaseModel):
     """
     A complete drink recipe as sent to the iOS app.
 
-    NOTE: ingredients are normalized to [String] so they decode cleanly on iOS.
-    We also expose BOTH `steps` and `instructions` so older clients that expect
-    `instructions` still work.
+    NOTE:
+    - ingredients: [String] so they decode cleanly on iOS.
+    - steps: [String] for structured instructions.
+    - instructions: String for backward compatibility with existing iOS models.
     """
     name: str
     description: str
 
-    # Ingredients must be strings for iOS
     ingredients: List[str]
 
-    # Instructions
+    # Structured instructions
     steps: List[str] = Field(default_factory=list, description="Step-by-step instructions")
-    instructions: List[str] = Field(default_factory=list, description="Backward-compatible alias for steps")
+
+    # Backward-compatible single-string instructions field
+    instructions: Optional[str] = Field(
+        default=None,
+        description="Single instructions string for older iOS clients."
+    )
 
     variations: List[str] = Field(default_factory=list)
     mood: Optional[str] = None
@@ -433,17 +438,19 @@ async def generate_drinks(
                     "Garnish as described and serve immediately.",
                 ]
 
+            # Build a single instructions string for the legacy client
+            instructions_str = " ".join(steps)
+
             logger.info(
                 f"Final normalized steps for '{drink_data.get('name', 'Unnamed Drink')}': {steps}"
             )
 
-            # Populate BOTH steps and instructions for backward compatibility
             drink = Drink(
                 name=drink_data.get("name", "Unnamed Drink"),
                 description=drink_data.get("description", ""),
                 ingredients=ingredients,
                 steps=steps,
-                instructions=steps,
+                instructions=instructions_str,
                 variations=drink_data.get("variations", []),
                 mood=drink_data.get("mood"),
                 flavorProfile=drink_data.get("flavorProfile", []),
