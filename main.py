@@ -174,29 +174,32 @@ IMPORTANT CONSTRAINTS:
     - Explore that preference through many different flavor families:
         - smoky teas, peppercorns, chilies other than jalapeño, bitter citrus, herbal bitters, etc.
 
-Return ONLY valid JSON in the expected schema.
+You must return ONLY valid JSON with this exact shape:
 
-Response format:
 {
     "drinks": [
         {
-            "name": "Drink Name",
-            "description": "A brief, enticing description",
-            "ingredients": [
-                {"name": "Ingredient", "amount": "2", "unit": "oz", "notes": "optional notes"}
-            ],
-            "steps": ["Step 1", "Step 2", "Step 3"],
-            "variations": ["Variation 1", "Variation 2"],
-            "mood": "relax",
-            "flavorProfile": ["citrus", "herbal"],
-            "estimatedPrepTime": "5 mins",
-            "servings": 1,
-            "garnish": "Mint sprig",
-            "glassware": "Highball glass",
-            "tags": ["refreshing", "citrus", "easy"]
+            "name": string,
+            "description": string,
+            "ingredients": [string, ...],
+            "instructions": string,
+            "garnish": string,
+            "glassware": string,
+            "tags": [string, ...]
         }
     ],
-    "reasoning": "Brief explanation of why these drinks match the user's preferences"
+    "reasoning": string
+}
+
+- "ingredients" must be an array of human-readable text strings like
+    "2 oz fresh orange juice (freshly squeezed)".
+- Do NOT make "ingredients" an array of objects or dictionaries.
+- Do NOT include fields like "amount", "unit", or "notes" inside "ingredients".
+Do NOT include any backticks.
+Do NOT include the word "json".
+Do NOT wrap the JSON in a code block.
+Do NOT add extra top-level fields.
+Return exactly one JSON object in this schema.
 }
 
 Rules:
@@ -432,3 +435,4 @@ async def recommend_drinks(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+    
