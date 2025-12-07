@@ -44,7 +44,7 @@ client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 # Model configuration
 MODEL_ID = "claude-sonnet-4-5-20250929"
 MAX_TOKENS = 1200
-TEMPERATURE = 0.7
+TEMPERATURE = 0.8  # slightly higher for more variety
 
 app = FastAPI(
     title="ZeroProof Backend",
@@ -82,20 +82,19 @@ class DrinkRequest(BaseModel):
     ingredients: Optional[List[str]] = Field(None, description="Available ingredients")
     persona: Optional[str] = Field("Classic", description="Bartender persona style")
     flavorOverride: Optional[List[str]] = Field(None, description="Priority flavors for this request")
-    numberOfSuggestions: int = Field(default=1, ge=1, le=5, description="Number of drinks to suggest")
+    numberOfSuggestions: int = Field(default=1, ge=1, le=5, description="Requested number of drinks")
+    # NEW: history/context from the client
+    previousDrinkNames: Optional[List[str]] = Field(
+        default=None,
+        description="Names of drinks the user has already seen; avoid repeating these or trivial variants."
+    )
+    overusedIngredients: Optional[List[str]] = Field(
+        default=None,
+        description="Ingredients that have been used too often recently; de-prioritize these as primary flavors."
+    )
 
 
 # ---------- Response Models ----------
-
-# We keep this around in case we want richer internal models later,
-# but the JSON we send to the app will always use ingredients as [str].
-class DrinkIngredient(BaseModel):
-    """Individual ingredient with measurement"""
-    name: str
-    amount: str
-    unit: Optional[str] = None
-    notes: Optional[str] = None
-
 
 class Drink(BaseModel):
     """A complete drink recipe as sent to the iOS app"""
@@ -147,7 +146,7 @@ You will be given:
 - An optional mood.
 - A list of previousDrinkNames (drinks the user has already seen this session).
 - Optionally, a list of overusedIngredients (flavors that have been used too often recently).
-- The desired numberOfSuggestions.
+- The desired numberOfSuggestions (the user-facing count; you may internally generate a few more options for variety).
 
 Your job is to return an array of NEW non-alcoholic drink ideas as structured JSON.
 
@@ -164,6 +163,7 @@ IMPORTANT CONSTRAINTS:
         - Do NOT make these the star or dominant flavor of new drinks.
         - You may include them in subtle supporting roles at most, but should strongly prefer other bases.
     - Aim to include a variety of bases over time: citrus, berry, stone fruit, tropical fruit, herbal, floral, tea-based, coffee-based, cola/soda, creamy/dessert, bitter, etc.
+    - If several recent drinks clearly share a similar base (for example, multiple peppery citrus coolers in a row), deliberately switch to a noticeably different base for the new suggestions.
 
 3. DISTINCT SUGGESTIONS PER CALL
     - Within a single response, each drink must be clearly distinct from the others in:
@@ -173,7 +173,7 @@ IMPORTANT CONSTRAINTS:
     - Do NOT return trivial variants like Mule / Fizz / Tonic of the same flavor base in the same batch.
 
 4. MATCH USER BUT AVOID RUTS
-    - It’s OK if the user likes bold, spicy flavors, but do NOT get stuck on only ginger and jalapeño.
+    - It’s OK if the user likes bold, spicy flavors, but do NOT get stuck on only ginger, jalapeño, or citrus+pepper riffs.
     - Explore that preference through many different flavor families:
         - smoky teas, peppercorns, chilies other than jalapeño, bitter citrus, herbal bitters, etc.
 
@@ -220,10 +220,16 @@ def build_prompt(req: DrinkRequest) -> str:
     """Build the user prompt from the request."""
     p = req.profile
 
-    sections = []
+    sections: List[str] = []
+
+    # Slightly decouple "user asked for N" from "model generates N":
+    # we tell the model to give us at least 3 options for variety.
+    effective_n = max(req.numberOfSuggestions, 3)
 
     # User taste profile
-    sections.append(f"Please suggest {req.numberOfSuggestions} non-alcoholic drink(s) based on the following preferences:")
+    sections.append(
+        f"Please suggest {effective_n} non-alcoholic drink(s) based on the following preferences:"
+    )
     sections.append("")
     sections.append("USER TASTE PROFILE:")
     sections.append(f"- Favorite flavors: {', '.join(p.favoriteFlavors) if p.favoriteFlavors else 'not specified'}")
@@ -242,9 +248,20 @@ def build_prompt(req: DrinkRequest) -> str:
         sections.append(f"\nFLAVOR OVERRIDE (prioritize these): {', '.join(req.flavorOverride)}")
 
     if req.ingredients:
-        sections.append(f"\nAVAILABLE INGREDIENTS (create drinks using primarily these):")
-        sections.append(', '.join(req.ingredients))
+        sections.append("\nAVAILABLE INGREDIENTS (create drinks using primarily these):")
+        sections.append(", ".join(req.ingredients))
         sections.append("Please only suggest drinks that can be made with these available ingredients.")
+
+    # History: previous drinks to avoid repeating / riffing too closely on
+    if req.previousDrinkNames:
+        sections.append("\nPREVIOUS DRINK NAMES (avoid repeats or trivial variants of these):")
+        for name in req.previousDrinkNames:
+            sections.append(f"- {name}")
+
+    # Optional: overused ingredients, if we start sending them from the app
+    if req.overusedIngredients:
+        sections.append("\nOVERUSED INGREDIENTS (avoid making these the main flavor):")
+        sections.append(", ".join(req.overusedIngredients))
 
     # Persona style
     persona = req.persona or "Classic"
@@ -253,7 +270,7 @@ def build_prompt(req: DrinkRequest) -> str:
 
     sections.append("\nRespond with valid JSON only.")
 
-    return '\n'.join(sections)
+    return "\n".join(sections)
 
 
 def extract_json(text: str) -> str:
@@ -306,7 +323,10 @@ async def generate_drinks(
 
     # Build the prompt
     prompt = build_prompt(request)
-    logger.info(f"Generating {request.numberOfSuggestions} drink(s) with persona: {request.persona or 'Classic'}")
+    logger.info(
+        f"Generating {request.numberOfSuggestions} drink(s) with persona: {request.persona or 'Classic'} "
+        f"(effective_n in prompt >= 3). Previous drinks: {request.previousDrinkNames or []}"
+    )
 
     # Call Anthropic API
     try:
