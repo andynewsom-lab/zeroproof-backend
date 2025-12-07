@@ -83,7 +83,7 @@ class DrinkRequest(BaseModel):
     persona: Optional[str] = Field("Classic", description="Bartender persona style")
     flavorOverride: Optional[List[str]] = Field(None, description="Priority flavors for this request")
     numberOfSuggestions: int = Field(default=1, ge=1, le=5, description="Requested number of drinks")
-    # NEW: history/context from the client
+    # History/context from the client
     previousDrinkNames: Optional[List[str]] = Field(
         default=None,
         description="Names of drinks the user has already seen; avoid repeating these or trivial variants."
@@ -100,7 +100,6 @@ class Drink(BaseModel):
     """A complete drink recipe as sent to the iOS app"""
     name: str
     description: str
-    # IMPORTANT: ingredients are STRINGS in the JSON contract with the app
     ingredients: List[str]
     steps: List[str] = Field(description="Step-by-step instructions")
     variations: List[str] = Field(default_factory=list)
@@ -226,7 +225,6 @@ def build_prompt(req: DrinkRequest) -> str:
     # we tell the model to give us at least 3 options for variety.
     effective_n = max(req.numberOfSuggestions, 3)
 
-    # User taste profile
     sections.append(
         f"Please suggest {effective_n} non-alcoholic drink(s) based on the following preferences:"
     )
@@ -240,7 +238,6 @@ def build_prompt(req: DrinkRequest) -> str:
     sections.append(f"- Usual moods: {', '.join(p.usualMoods) if p.usualMoods else 'not specified'}")
     sections.append(f"- Dietary restrictions: {', '.join(p.dietaryRestrictions) if p.dietaryRestrictions else 'none'}")
 
-    # Current context
     if req.mood:
         sections.append(f"\nCURRENT MOOD: {req.mood}")
 
@@ -252,18 +249,15 @@ def build_prompt(req: DrinkRequest) -> str:
         sections.append(", ".join(req.ingredients))
         sections.append("Please only suggest drinks that can be made with these available ingredients.")
 
-    # History: previous drinks to avoid repeating / riffing too closely on
     if req.previousDrinkNames:
         sections.append("\nPREVIOUS DRINK NAMES (avoid repeats or trivial variants of these):")
         for name in req.previousDrinkNames:
             sections.append(f"- {name}")
 
-    # Optional: overused ingredients, if we start sending them from the app
     if req.overusedIngredients:
         sections.append("\nOVERUSED INGREDIENTS (avoid making these the main flavor):")
         sections.append(", ".join(req.overusedIngredients))
 
-    # Persona style
     persona = req.persona or "Classic"
     persona_instruction = PERSONA_PROMPTS.get(persona, PERSONA_PROMPTS["Classic"])
     sections.append(f"\nSTYLE INSTRUCTION: {persona_instruction}")
@@ -277,7 +271,6 @@ def extract_json(text: str) -> str:
     """Extract JSON from response text, handling markdown code blocks."""
     cleaned = text.strip()
 
-    # Remove markdown code block markers
     if cleaned.startswith("```json"):
         cleaned = cleaned[7:]
     elif cleaned.startswith("```"):
@@ -288,7 +281,6 @@ def extract_json(text: str) -> str:
 
     cleaned = cleaned.strip()
 
-    # Find JSON object boundaries
     start = cleaned.find("{")
     end = cleaned.rfind("}")
 
@@ -311,24 +303,17 @@ async def generate_drinks(
     request: DrinkRequest,
     x_app_key: Optional[str] = Header(None, alias="x-app-key")
 ):
-    """
-    Generate non-alcoholic drink recommendations based on user preferences.
-
-    Requires X-App-Key header for authentication.
-    """
-    # Validate app key
+    """Generate non-alcoholic drink recommendations based on user preferences."""
     if x_app_key != APP_SHARED_KEY:
         logger.warning("Unauthorized request - invalid app key")
         raise HTTPException(status_code=401, detail="Unauthorized - invalid app key")
 
-    # Build the prompt
     prompt = build_prompt(request)
     logger.info(
         f"Generating {request.numberOfSuggestions} drink(s) with persona: {request.persona or 'Classic'} "
         f"(effective_n in prompt >= 3). Previous drinks: {request.previousDrinkNames or []}"
     )
 
-    # Call Anthropic API
     try:
         message = client.messages.create(
             model=MODEL_ID,
@@ -344,7 +329,6 @@ async def generate_drinks(
         logger.error(f"Unexpected error calling Anthropic: {e}")
         raise HTTPException(status_code=502, detail="AI service unavailable")
 
-    # Extract text content from response
     try:
         text_block = next(
             block for block in message.content
@@ -355,7 +339,6 @@ async def generate_drinks(
         logger.error("No text content in Anthropic response")
         raise HTTPException(status_code=502, detail="Invalid response from AI service")
 
-    # Parse JSON from response
     clean_json = extract_json(raw_json)
 
     try:
@@ -365,21 +348,17 @@ async def generate_drinks(
         logger.error(f"Raw response: {raw_json[:500]}...")
         raise HTTPException(status_code=502, detail="Failed to parse AI response")
 
-    # Validate and transform response
     try:
         drinks: List[Drink] = []
 
         for drink_data in data.get("drinks", []):
-            # Normalize ingredients to a list of strings for the iOS client
             raw_ingredients = drink_data.get("ingredients", [])
             ingredients: List[str] = []
 
             for ing in raw_ingredients:
                 if isinstance(ing, str):
-                    # Already in the format the app expects
                     ingredients.append(ing)
                 elif isinstance(ing, dict):
-                    # Build a single line like "2 oz fresh orange juice (freshly squeezed)"
                     name = ing.get("name") or ing.get("ingredient") or ""
                     amount = ing.get("amount") or ing.get("quantity") or ""
                     unit = ing.get("unit") or ""
@@ -394,12 +373,30 @@ async def generate_drinks(
                     if line:
                         ingredients.append(line)
 
-            # Handle instructions as either string or list
-            raw_instructions = drink_data.get("instructions") or drink_data.get("steps", [])
+            # 🔧 More robust instructions handling
+            raw_instructions = (
+                drink_data.get("instructions")
+                or drink_data.get("steps")
+                or drink_data.get("directions")
+                or drink_data.get("method")
+                or drink_data.get("preparation")
+                or []
+            )
+
             if isinstance(raw_instructions, str):
-                steps = [s.strip() for s in raw_instructions.split('.') if s.strip()]
+                parts = raw_instructions.replace("\n", ".").split(".")
+                steps = [s.strip() for s in parts if s.strip()]
+            elif isinstance(raw_instructions, list):
+                steps = [str(s).strip() for s in raw_instructions if str(s).strip()]
             else:
-                steps = raw_instructions
+                steps = []
+
+            if not steps:
+                steps = [
+                    "Add all ingredients to a glass with ice.",
+                    "Stir or shake until well chilled.",
+                    "Garnish as suggested and serve."
+                ]
 
             drink = Drink(
                 name=drink_data.get("name", "Unnamed Drink"),
@@ -429,7 +426,6 @@ async def generate_drinks(
 
         logger.info(f"Successfully generated {len(drinks)} drink(s)")
 
-        # Log the exact JSON being sent to iOS for debugging
         response_json = response.model_dump()
         logger.info(f"Response JSON keys: {list(response_json.keys())}")
         if drinks:
@@ -448,16 +444,11 @@ async def generate_drinks(
         raise HTTPException(status_code=502, detail=f"Response validation error: {str(e)}")
 
 
-# Legacy endpoint for backwards compatibility
 @app.post("/api/drinks/recommend", response_model=DrinkResponse)
 async def recommend_drinks(
     request: DrinkRequest,
     x_app_key: Optional[str] = Header(None, alias="x-app-key")
 ):
-    """
-    Alternative endpoint path for drink recommendations.
-    Same functionality as /generate-drinks.
-    """
     return await generate_drinks(request, x_app_key)
 
 
