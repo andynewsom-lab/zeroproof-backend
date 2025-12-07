@@ -102,11 +102,19 @@ class Drink(BaseModel):
     A complete drink recipe as sent to the iOS app.
 
     NOTE: ingredients are normalized to [String] so they decode cleanly on iOS.
+    We also expose BOTH `steps` and `instructions` so older clients that expect
+    `instructions` still work.
     """
     name: str
     description: str
+
+    # Ingredients must be strings for iOS
     ingredients: List[str]
-    steps: List[str] = Field(description="Step-by-step instructions")
+
+    # Instructions
+    steps: List[str] = Field(default_factory=list, description="Step-by-step instructions")
+    instructions: List[str] = Field(default_factory=list, description="Backward-compatible alias for steps")
+
     variations: List[str] = Field(default_factory=list)
     mood: Optional[str] = None
     flavorProfile: List[str] = Field(default_factory=list)
@@ -298,7 +306,7 @@ def extract_json(text: str) -> str:
     end = cleaned.rfind("}")
 
     if start != -1 and end != -1 and end > start:
-        return cleaned[start : end + 1]
+        return cleaned[start: end + 1]
 
     return cleaned
 
@@ -429,11 +437,13 @@ async def generate_drinks(
                 f"Final normalized steps for '{drink_data.get('name', 'Unnamed Drink')}': {steps}"
             )
 
+            # Populate BOTH steps and instructions for backward compatibility
             drink = Drink(
                 name=drink_data.get("name", "Unnamed Drink"),
                 description=drink_data.get("description", ""),
                 ingredients=ingredients,
                 steps=steps,
+                instructions=steps,
                 variations=drink_data.get("variations", []),
                 mood=drink_data.get("mood"),
                 flavorProfile=drink_data.get("flavorProfile", []),
@@ -465,6 +475,7 @@ async def generate_drinks(
             first = response_json["drinks"][0]
             logger.info(f"First drink keys: {list(first.keys())}")
             logger.info(f"First drink steps: {first.get('steps')}")
+            logger.info(f"First drink instructions: {first.get('instructions')}")
             logger.info(f"First drink ingredients: {first.get('ingredients')}")
 
         return response
